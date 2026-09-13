@@ -1,266 +1,575 @@
-"""Rapido Captain Acquisition & Supply Analysis Pipeline.
+# Rapido Captain Acquisition & Supply Optimization
 
-Executes end-to-end processing from raw data ingestion to funnel metrics,
-segment leak evaluation, campaign uplift, and airport gap sizing.
-"""
+Data Science take-home focused on improving captain onboarding, approval, activation, and airport supply.
 
-from pathlib import Path
-import json
-import numpy as np
-import pandas as pd
-import statsmodels.api as sm
+## 1. Problem
 
-# -----------------------------------------------------------------------------
-# Configuration & Directory Setup
-# -----------------------------------------------------------------------------
-BASE_DIR = Path(".")
-DATA_RAW = BASE_DIR / "data" / "raw"
-DATA_PROCESSED = BASE_DIR / "data" / "processed"
-OUTPUTS_RESULTS = BASE_DIR / "outputs" / "results"
-OUTPUTS_TABLES = BASE_DIR / "outputs" / "tables"
+The goal of this analysis is to understand where captain acquisition is losing potential supply and identify practical interventions that can increase the number of captains who become productive.
 
-for directory in [DATA_PROCESSED, OUTPUTS_RESULTS, OUTPUTS_TABLES]:
-    directory.mkdir(parents=True, exist_ok=True)
+The analysis covers two connected problems:
 
-# -----------------------------------------------------------------------------
-# 1. Data Ingestion & Quality Audit
-# -----------------------------------------------------------------------------
-print("Loading raw datasets...")
-captains = pd.read_csv(DATA_RAW / "captains.csv")
-doc_events = pd.read_csv(DATA_RAW / "doc_events.csv")
-approvals = pd.read_csv(DATA_RAW / "approvals.csv")
-activation = pd.read_csv(DATA_RAW / "activation.csv")
-nudges = pd.read_csv(DATA_RAW / "nudges.csv")
-airport_hourly = pd.read_csv(DATA_RAW / "airport_hourly.csv")
-airport_trips = pd.read_csv(DATA_RAW / "airport_trips.csv")
+- Captain onboarding and document completion
+- Airport demand-supply mismatch
 
-# Standardize timestamps
-captains["signup_timestamp"] = pd.to_datetime(captains["signup_timestamp"])
-captains["signup_month"] = captains["signup_timestamp"].dt.to_period("M").astype(str)
+The main business metric used in the decision analysis is not just signup or approval volume. The focus is on moving captains further through the funnel and ultimately increasing first-order completions.
 
-# -----------------------------------------------------------------------------
-# 2. Sequential Onboarding Funnel
-# -----------------------------------------------------------------------------
-print("Building onboarding funnel...")
+---
 
-# Resolve successfully verified document types per captain
-verified_docs = (
-    doc_events[doc_events["status"].str.upper() == "APPROVED"]
-    .groupby(["captain_id", "doc_type"])
-    .size()
-    .unstack(fill_value=0)
-)
+## 2. Business Questions
 
-funnel = captains[["captain_id", "city", "vehicle_type", "channel", "signup_month"]].copy()
-funnel = funnel.merge(verified_docs, on="captain_id", how="left").fillna(0)
-funnel = funnel.merge(approvals[["captain_id", "is_approved"]], on="captain_id", how="left")
-funnel = funnel.merge(activation[["captain_id", "first_order_timestamp"]], on="captain_id", how="left")
+### Part A — Captain Acquisition
 
-funnel["is_approved"] = funnel["is_approved"].fillna(0).astype(int)
-funnel["has_first_order"] = funnel["first_order_timestamp"].notna().astype(int)
+1. What does the signup → approval → first-order funnel look like?
+2. Which onboarding stage and captain segments have the largest actionable leakage?
+3. Does `CAMP_WA_002` appear to improve captain approval?
+4. What interventions should be prioritized based on expected business impact?
 
-# Stage adherence flags
-funnel["stage_signup"] = 1
-funnel["stage_dl"] = (funnel["DL"] > 0).astype(int)
-funnel["stage_rc"] = (funnel["stage_dl"] & (funnel["RC"] > 0)).astype(int)
-funnel["stage_aadhaar"] = (funnel["stage_rc"] & (funnel["AADHAAR"] > 0)).astype(int)
+### Part B — Supply Optimization
 
-# PERMIT is mandatory only for Auto and Cab; ERickshaw bypasses to next stage
-needs_permit = funnel["vehicle_type"].str.upper().isin(["AUTO", "CAB"])
-funnel["stage_permit"] = np.where(
-    needs_permit,
-    (funnel["stage_aadhaar"] & (funnel.get("PERMIT", 0) > 0)).astype(int),
-    funnel["stage_aadhaar"],
-)
+1. Where and when does airport demand exceed available captain supply?
+2. What happens to trips after airport pickups?
+3. Should Rapido acquire more captains specifically for airport demand?
 
-funnel["stage_fitness"] = (funnel["stage_permit"] & (funnel.get("FITNESS", 0) > 0)).astype(int)
-funnel["stage_insurance"] = (funnel["stage_fitness"] & (funnel.get("INSURANCE", 0) > 0)).astype(int)
-funnel["stage_approved"] = (funnel["stage_insurance"] & (funnel["is_approved"] == 1)).astype(int)
-funnel["stage_first_order"] = (funnel["stage_approved"] & (funnel["has_first_order"] == 1)).astype(int)
+---
 
-# Save Funnel Metrics Summary
-funnel_summary = pd.DataFrame({
-    "Stage": [
-        "Signups", "DL", "RC", "AADHAAR", "PERMIT", 
-        "FITNESS", "INSURANCE", "Approved", "First Order"
-    ],
-    "Captains": [
-        funnel["stage_signup"].sum(),
-        funnel["stage_dl"].sum(),
-        funnel["stage_rc"].sum(),
-        funnel["stage_aadhaar"].sum(),
-        funnel["stage_permit"].sum(),
-        funnel["stage_fitness"].sum(),
-        funnel["stage_insurance"].sum(),
-        funnel["stage_approved"].sum(),
-        funnel["stage_first_order"].sum(),
-    ]
-})
-funnel_summary.to_csv(OUTPUTS_TABLES / "funnel_summary.csv", index=False)
+## 3. Data
 
-# -----------------------------------------------------------------------------
-# 3. A2 — Onboarding Leak & Opportunity Analysis
-# -----------------------------------------------------------------------------
-print("Analyzing stage drop-offs and actionable segments...")
+The project uses the synthetic datasets provided for the assignment.
 
-group_cols = ["city", "vehicle_type", "channel", "signup_month"]
-stage_cols = [
-    "stage_signup", "stage_dl", "stage_rc", "stage_aadhaar", 
-    "stage_permit", "stage_fitness", "stage_insurance", "stage_approved"
-]
+### Captain and onboarding data
 
-stage_segments = funnel.groupby(group_cols)[stage_cols].sum().reset_index()
-stage_segments.to_csv(OUTPUTS_RESULTS / "a2_stage_segments.csv", index=False)
+- `captains.csv`
+- `doc_events.csv`
+- `approvals.csv`
+- `activation.csv`
+- `nudges.csv`
 
-# Identify leaks (absolute count lost per transition)
-segment_leaks = stage_segments.copy()
-segment_leaks["leak_permit"] = segment_leaks["stage_aadhaar"] - segment_leaks["stage_permit"]
-segment_leaks["leak_overall"] = segment_leaks["stage_signup"] - segment_leaks["stage_approved"]
-segment_leaks.to_csv(OUTPUTS_RESULTS / "a2_segment_leaks.csv", index=False)
+### Airport data
 
-# Actionable Segment Ranking (Permit Leaks)
-actionable_segments = (
-    segment_leaks.groupby(["city", "vehicle_type", "channel"])[["leak_permit"]]
-    .sum()
-    .sort_values(by="leak_permit", ascending=False)
-    .reset_index()
-)
-actionable_segments.to_csv(OUTPUTS_RESULTS / "a2_actionable_segments.csv", index=False)
+- `airport_hourly.csv`
+- `airport_trips.csv`
 
-# Mature Cohort Opportunity Model (Excluding latest snapshot cohort)
-latest_cohort = funnel["signup_month"].max()
-mature_cohorts = funnel[funnel["signup_month"] < latest_cohort]
+The extraction cutoff specified in the assignment is:
 
-# Historical conversion rate from Permit clearance to Final Approval
-permit_cleared = mature_cohorts[mature_cohorts["stage_permit"] == 1]
-downstream_approval_rate = (
-    permit_cleared["stage_approved"].sum() / permit_cleared["stage_permit"].sum()
-    if permit_cleared["stage_permit"].sum() > 0 else 0
-)
+`2026-06-30 23:59 IST`
 
-# Model: 20% relative reduction in stage non-clearance
-opportunity_df = actionable_segments.copy()
-opportunity_df["recovered_dropouts_20pct"] = opportunity_df["leak_permit"] * 0.20
-opportunity_df["incremental_approvals_scenario"] = (
-    opportunity_df["recovered_dropouts_20pct"] * downstream_approval_rate
-).round(1)
-opportunity_df.to_csv(OUTPUTS_RESULTS / "a2_approval_opportunity.csv", index=False)
+The document sequence is:
 
-# -----------------------------------------------------------------------------
-# 4. A3 — Campaign Uplift Inference (CAMP_WA_002)
-# -----------------------------------------------------------------------------
-print("Evaluating campaign performance...")
+`DL → RC → Aadhaar → Permit → Fitness → Insurance`
 
-# Merge nudge exposures
-camp_nudges = nudges[nudges["campaign_id"] == "CAMP_WA_002"].drop_duplicates(subset=["captain_id"])
-eval_df = funnel.merge(
-    camp_nudges[["captain_id", "delivered"]],
-    on="captain_id",
-    how="left"
-)
-eval_df["treated"] = eval_df["delivered"].fillna(0).astype(int)
+Permit is required for Auto and Cab. ERickshaw does not require a Permit.
 
-# Observed statistics
-treated_group = eval_df[eval_df["treated"] == 1]["stage_approved"]
-control_group = eval_df[eval_df["treated"] == 0]["stage_approved"]
+---
 
-p1 = treated_group.mean() if len(treated_group) > 0 else 0
-p0 = control_group.mean() if len(control_group) > 0 else 0
-observed_lift = p1 - p0
+## 4. Project Structure
 
-# Standard error & 95% Confidence Interval
-n1, n0 = len(treated_group), len(control_group)
-se = np.sqrt((p1 * (1 - p1) / n1) + (p0 * (1 - p0) / n0)) if n1 > 0 and n0 > 0 else 0
-ci_lower = observed_lift - (1.96 * se)
-ci_upper = observed_lift + (1.96 * se)
+```text
+Rapido_Data_Science/
+│
+├── data/
+│   ├── raw/
+│   │   └── input CSV files
+│   └── processed/
+│       ├── captains_clean.csv
+│       ├── doc_events_clean.csv
+│       ├── approvals_clean.csv
+│       ├── activation_clean.csv
+│       ├── airport_hourly_clean.csv
+│       └── captain_master.csv
+│
+├── notebooks/
+│   └── analysis.ipynb
+│
+├── src/
+│   ├── config.py
+│   ├── data_loader.py
+│   │
+│   ├── data_quality/
+│   │   └── audit.py
+│   │
+│   ├── preprocessing/
+│   │   ├── clean.py
+│   │   └── master_table.py
+│   │
+│   ├── onboarding/
+│   │   ├── funnel.py
+│   │   └── leak_analysis.py
+│   │
+│   ├── campaign/
+│   │   └── campaign_analysis.py
+│   │
+│   ├── airport/
+│   │   └── airport_analysis.py
+│   │
+│   └── decision/
+│       └── decision_analysis.py
+│
+├── outputs/
+│   ├── results/
+│   ├── tables/
+│   └── charts/
+│
+├── reports/
+│   ├── memo/
+│   └── deck/
+│
+├── run_analysis.py
+├── requirements.txt
+├── README.md
+└── .gitignore
+```
 
-# Logistic regression adjustment
-reg_data = pd.get_dummies(
-    eval_df[["stage_approved", "treated", "city", "vehicle_type", "channel"]],
-    columns=["city", "vehicle_type", "channel"],
-    drop_first=True,
-    dtype=float
-)
-X = sm.add_constant(reg_data.drop(columns=["stage_approved"]))
-y = reg_data["stage_approved"]
+---
 
-logit_model = sm.Logit(y, X).fit(disp=False)
-odds_ratio = np.exp(logit_model.params["treated"])
+## 5. Approach
 
-# Average Marginal Effect (Adjusted Lift)
-marginal_effects = logit_model.get_margeff(at="overall")
-treated_idx = list(X.columns).index("treated") - 1
-adjusted_lift = marginal_effects.margeff[treated_idx]
+The analysis is organized as a reproducible pipeline rather than a collection of manually generated tables.
 
-campaign_metrics = {
-    "observed_lift_pp": round(float(observed_lift * 100), 2),
-    "ci_95_lower_pp": round(float(ci_lower * 100), 2),
-    "ci_95_upper_pp": round(float(ci_upper * 100), 2),
-    "adjusted_lift_pp": round(float(adjusted_lift * 100), 2),
-    "odds_ratio": round(float(odds_ratio), 2),
-}
+```text
+Raw CSVs
+   ↓
+Data quality checks
+   ↓
+Cleaning and normalization
+   ↓
+Captain master table
+   ↓
+Funnel analysis
+   ↓
+Segment-level leak analysis
+   ↓
+Campaign evaluation
+   ↓
+Airport supply analysis
+   ↓
+Decision engine
+   ↓
+Business recommendations
+```
 
-with open(OUTPUTS_RESULTS / "campaign_confidence.json", "w") as f:
-    json.dump(campaign_metrics, f, indent=4)
+### Data quality
 
-# -----------------------------------------------------------------------------
-# 5. B1/B3 — Airport Supply Gap Sizing
-# -----------------------------------------------------------------------------
-print("Analyzing airport demand/supply gaps...")
+Before analysis, the pipeline checks for issues such as:
 
-# Benchmark: 75th percentile of hourly fulfillment rate
-p75_fulfillment = airport_hourly["fulfilled_trips"].sum() / airport_hourly["demand"].sum()
-airport_hourly["target_trips"] = np.ceil(airport_hourly["demand"] * p75_fulfillment)
-airport_hourly["supply_gap_trips"] = np.maximum(
-    0, airport_hourly["target_trips"] - airport_hourly["fulfilled_trips"]
-)
+- Missing or duplicate captain IDs
+- Invalid vehicle types
+- Invalid document types
+- Invalid document event types
+- Invalid attempt numbers
+- Orphan captain IDs
+- Invalid approval statuses
+- Invalid airport metrics
+- Invalid hours
+- Request/fulfillment mismatches
+- Signup dates outside the assignment cutoff
 
-# Convert trip shortage to captain-hour capacity equivalent
-TRIPS_PER_CAPTAIN_HOUR = 1.2
-airport_hourly["captain_gap_capacity"] = (
-    airport_hourly["supply_gap_trips"] / TRIPS_PER_CAPTAIN_HOUR
-).round(1)
+The current run completed the quality checks with:
 
-b3_airport_supply_gap = (
-    airport_hourly.groupby("hour")[["supply_gap_trips", "captain_gap_capacity"]]
-    .sum()
-    .reset_index()
-)
-b3_airport_supply_gap.to_csv(OUTPUTS_RESULTS / "b3_airport_supply_gap.csv", index=False)
+`0 issues detected`
 
-# -----------------------------------------------------------------------------
-# 6. B2 — Airport Trip Economics & Friction
-# -----------------------------------------------------------------------------
-print("Aggregating airport trip metrics...")
+Missing values are not blindly dropped. Validation and analytical filtering are handled separately so that data-quality problems are visible rather than silently removed.
 
-# Global aggregates
-b2_overall = pd.DataFrame([{
-    "total_trips": len(airport_trips),
-    "cancellation_rate": airport_trips["is_cancelled"].mean(),
-    "return_fare_rate_20min": airport_trips["has_return_fare_20min"].mean(),
-    "avg_fare": airport_trips["fare"].mean(),
-    "avg_distance_km": airport_trips["distance_km"].mean(),
-}])
-b2_overall.to_csv(OUTPUTS_RESULTS / "b2_airport_trip_overall.csv", index=False)
+---
 
-# Hourly trip behavior
-b2_hourly = airport_trips.groupby("trip_hour").agg(
-    trips=("trip_id", "count"),
-    cancellation_rate=("is_cancelled", "mean"),
-    return_fare_rate=("has_return_fare_20min", "mean"),
-    avg_fare=("fare", "mean"),
-    avg_distance_km=("distance_km", "mean"),
-).reset_index()
-b2_hourly.to_csv(OUTPUTS_RESULTS / "b2_airport_trip_hourly.csv", index=False)
+## 6. Funnel Definition
 
-# Destination zone breakdown
-b2_destination = airport_trips.groupby("destination_zone").agg(
-    trips=("trip_id", "count"),
-    cancellation_rate=("is_cancelled", "mean"),
-    return_fare_rate=("has_return_fare_20min", "mean"),
-    avg_fare=("fare", "mean"),
-    avg_distance_km=("distance_km", "mean"),
-).reset_index()
-b2_destination.to_csv(OUTPUTS_RESULTS / "b2_airport_trip_destination.csv", index=False)
+The onboarding funnel follows the document order specified in the assignment.
 
-print("Pipeline execution complete. All tables and results generated successfully.")
+A captain is counted as having cleared a document when a valid `verification_pass` event is present.
+
+For Permit:
+
+- Auto → Permit required
+- Cab → Permit required
+- ERickshaw → Permit not required
+
+The final funnel is:
+
+| Stage | Captains | Stage Conversion | Cumulative Conversion |
+|---|---:|---:|---:|
+| Signup | 25,000 | 100.0% | 100.0% |
+| DL | 21,954 | 87.8% | 87.8% |
+| RC | 15,852 | 72.2% | 63.4% |
+| Aadhaar | 14,095 | 88.9% | 56.4% |
+| Permit | 11,177 | 79.3% | 44.7% |
+| Fitness | 8,241 | 73.7% | 33.0% |
+| Insurance | 4,664 | 56.6% | 18.7% |
+| All Documents Cleared | 4,664 | 100.0% | 18.7% |
+| Approved | 4,206 | 90.2% | 16.8% |
+| First Order | 1,610 | 38.3% | 6.4% |
+
+The biggest post-approval opportunity is also visible here:
+
+`4,206 approved → 1,610 first orders`
+
+This means 2,596 approved captains did not complete a first order in the observed data.
+
+---
+
+## 7. Key Findings
+
+### 7.1 Onboarding
+
+Only `6.4%` of signups reach a completed first order.
+
+The largest absolute document-stage loss occurs at Insurance:
+
+- 8,241 reached the stage
+- 4,664 cleared it
+- 3,577 were lost
+
+However, absolute drop-off alone is not used to choose the intervention. Segment size, stage leakage, and downstream value are considered together.
+
+### 7.2 Highest-priority onboarding segments
+
+The decision analysis identifies Permit completion among Auto/Cab captains as the strongest actionable segment-level opportunity.
+
+Examples include:
+
+- Pune Auto, organic_app
+- Hyderabad Cab, organic_app
+- Hyderabad Auto, organic_app
+- Bangalore Cab, organic_app
+- Pune Auto, referral
+
+For example, Pune Auto + organic_app at the Permit stage has:
+
+- 1,172 captains reaching the stage
+- 744 not cleared
+- 20% recovery scenario
+- 148.8 scenario incremental approvals
+- approximately 57 expected first orders using the observed 38.3% approval-to-first-order rate
+
+These numbers are scenario estimates, not measured causal impact.
+
+### 7.3 Monthly onboarding opportunity
+
+Using mature signup cohorts and a 20% relative reduction in stage non-clearance, the scenario model estimates approximately:
+
+- Permit: `396.6` incremental approvals/month
+- RC: `122.1`
+- DL: `45.8`
+- Aadhaar: `17.9`
+- Fitness: `5.9`
+
+The Permit estimate is therefore the main number used for prioritization.
+
+---
+
+## 8. CAMP_WA_002
+
+The campaign analysis compares captains exposed to `CAMP_WA_002` with the control group.
+
+### Observed result
+
+- Treatment: 8,673 captains
+- Control: 16,327 captains
+- Treatment approval rate: 28.5%
+- Control approval rate: 10.6%
+- Observed lift: +17.9 percentage points
+- 95% CI: +16.8 to +19.0 percentage points
+
+After adjusting for available captain characteristics:
+
+- Adjusted treatment probability: 27.6%
+- Adjusted control probability: 10.9%
+- Adjusted lift: +16.7 percentage points
+- Odds ratio: 3.26
+
+The result is statistically strong, but the campaign exposure was not randomized.
+
+Therefore, the analysis treats this as an observational association rather than a causal estimate.
+
+### Recommendation
+
+Run a randomized holdout before scaling the campaign broadly.
+
+The experiment should measure:
+
+- Incremental approval
+- Time to approval
+- First-order conversion
+- Cost per incremental approved captain
+- Cost per incremental first-order captain
+
+---
+
+## 9. Airport Supply Analysis
+
+The airport analysis shows a clear demand-supply mismatch at airport terminals compared with CBD zones.
+
+The most problematic period is concentrated around:
+
+`21:00–03:00`
+
+The highest-gap hours include:
+
+`22:00, 23:00, 01:00, 02:00, 00:00, 21:00`
+
+Late-night airport trips also show:
+
+- Higher cancellation rate: 17.09%
+- Lower return-fare-within-20-min rate: 29.84%
+
+For comparison, overall airport-trip cancellation is 13.77% and return fare within 20 minutes is 35.96%.
+
+---
+
+## 10. Acquisition Recommendation
+
+The analysis does not recommend immediately acquiring a large number of airport-focused captains.
+
+The preferred sequence is:
+
+```text
+Identify airport shortage
+        ↓
+Target the 21:00–03:00 window
+        ↓
+Use incentives / reposition existing supply
+        ↓
+Measure fulfillment and cancellations
+        ↓
+If the gap remains
+        ↓
+Run targeted acquisition
+```
+
+This is preferable to broad acquisition because the supply problem is concentrated in specific locations and hours.
+
+If acquisition is required, it should be targeted using:
+
+- Airport zone
+- Hour
+- Vehicle type
+- Supply gap
+- Expected utilization
+
+---
+
+## 11. Decision Framework
+
+The project uses a simple decision framework focused on productive supply.
+
+For onboarding interventions:
+
+```text
+Recoverable captains
+        ×
+Downstream approval probability
+        ×
+Approval → First Order rate
+        =
+Expected incremental first orders
+```
+
+The current scenario uses:
+
+- Recovery rate: `20%`
+- Approval → First Order rate: `38.3%`
+
+These are assumptions for prioritization and are not causal estimates.
+
+For airport supply:
+
+```text
+Demand gap
+    ↓
+Existing supply intervention
+    ↓
+Controlled measurement
+    ↓
+Targeted acquisition if required
+```
+
+The objective is to increase productive captain supply rather than maximize signup volume alone.
+
+---
+
+## 12. Recommendations
+
+### 1. Improve Permit completion
+
+Prioritize Auto/Cab segments with high Permit leakage, especially in Pune and Hyderabad.
+
+Use targeted document guidance and assisted resolution for repeated failures.
+
+**Impact:** Approximately 397 incremental approvals/month under the 20% recovery scenario.
+
+**Cost:** Low to medium
+
+**Risk:** Low to medium
+
+---
+
+### 2. Validate CAMP_WA_002 with a holdout
+
+The campaign has a strong observed and adjusted association with approval.
+
+Before scaling, run a randomized experiment to measure true incremental impact.
+
+**Impact:** Potentially significant, but causal impact is not established yet.
+
+**Cost:** Low
+
+**Risk:** Medium
+
+---
+
+### 3. Improve Approved → First Order conversion
+
+There are 2,596 approved captains who do not complete a first order.
+
+Potential interventions include:
+
+- First-order nudges
+- Activation incentives
+- Zone-specific supply opportunities
+- Assisted activation
+
+The primary metric should be incremental first orders rather than approval volume alone.
+
+---
+
+### 4. Fix airport late-night supply before broad acquisition
+
+Use targeted incentives and repositioning during the 21:00–03:00 shortage window.
+
+Only add acquisition after measuring whether existing-supply interventions are insufficient.
+
+---
+
+## 13. Outputs
+
+The pipeline generates the following outputs.
+
+### Processed data
+
+```text
+data/processed/captains_clean.csv
+data/processed/doc_events_clean.csv
+data/processed/approvals_clean.csv
+data/processed/activation_clean.csv
+data/processed/airport_hourly_clean.csv
+data/processed/captain_master.csv
+```
+
+### Results
+
+```text
+outputs/results/data_quality_report.json
+outputs/results/intervention_priority.json
+outputs/results/campaign_confidence.json
+```
+
+### Analysis tables
+
+```text
+outputs/tables/onboarding_funnel.csv
+outputs/tables/document_funnel.csv
+outputs/tables/document_dropoff.csv
+outputs/tables/document_failure_reasons.csv
+outputs/tables/a2_actionable_segments.csv
+outputs/tables/a2_approval_opportunity.csv
+outputs/tables/a2_segment_leaks.csv
+outputs/tables/intervention_priority.csv
+outputs/tables/campaign_descriptive.csv
+outputs/tables/airport_hourly_summary.csv
+outputs/tables/airport_zone_summary.csv
+outputs/tables/b2_airport_trip_destination.csv
+outputs/tables/b2_airport_trip_hourly.csv
+outputs/tables/b2_airport_trip_overall.csv
+outputs/tables/b3_airport_recommendation.csv
+outputs/tables/b3_airport_supply_gap.csv
+```
+
+---
+
+## 14. How to Run
+
+### 1. Create and activate a virtual environment
+
+Windows PowerShell:
+
+```powershell
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+```
+
+### 2. Install dependencies
+
+```powershell
+pip install -r requirements.txt
+```
+
+### 3. Run the complete analysis
+
+```powershell
+python run_analysis.py
+```
+
+The script reads the raw CSV files from:
+
+```text
+data/raw/
+```
+
+and writes cleaned data and analysis outputs to:
+
+```text
+data/processed/
+outputs/
+```
+
+---
+
+## 15. Assumptions and Limitations
+
+### Scenario assumptions
+
+The intervention priority model assumes a 20% relative reduction in stage non-clearance.
+
+This is a planning scenario and should not be interpreted as a causal forecast.
+
+### Campaign limitation
+
+`CAMP_WA_002` was not evaluated from a randomized experiment. The adjusted result controls for available variables but cannot remove all selection bias.
+
+### Productivity limitation
+
+The supplied data provides first-order completion, but does not provide a complete long-term captain productivity or contribution margin measure.
+
+Therefore, first-order completion is used as the available proxy for productive activation.
+
+### Airport acquisition limitation
+
+The estimated airport supply gap should not be interpreted as a direct recommendation to acquire that exact number of captains. Existing-supply interventions should be tested first.
+
+---
+
+## 16. Final Business Takeaway
+
+The main opportunity is not simply to acquire more captains.
+
+It is to improve the conversion of acquired captains into productive supply.
+
+The analysis therefore connects:
+
+```text
+Captain acquisition
+        ↓
+Onboarding recovery
+        ↓
+Approval
+        ↓
+First-order activation
+        ↓
+Airport demand-supply matching
+        ↓
+Productive supply
+```
+
+This leads to a practical strategy:
+
+**Fix high-value onboarding friction, validate acquisition interventions experimentally, improve post-approval activation, and acquire new supply only where demand gaps justify it.**
+

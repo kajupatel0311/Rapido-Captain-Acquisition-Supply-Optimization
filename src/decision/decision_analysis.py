@@ -777,24 +777,24 @@ def estimate_incremental_approvals(
 
     Preferred calculation
     ---------------------
-    When stage_segment_table is supplied, this function produces a
-    genuinely monthly opportunity estimate:
+    When stage_segment_table is supplied, the estimate is calculated
+    separately for each mature signup-month cohort:
 
-        monthly failed captains
-        × recovery assumption
+        failed captains
+        × assumed recovery rate
         × downstream approval probability
 
-    The downstream approval probability is estimated from mature signup
-    cohorts for the same city / vehicle / acquisition-channel / stage.
+    The downstream approval probability is pooled within:
+
+        city × vehicle × acquisition_channel × stage
 
     Cohort rule
     -----------
-    The latest signup month in the data is treated as immature and is
-    excluded from opportunity sizing. This is appropriate for this
-    dataset because the extraction date is 2026-06-30 and the latest
-    signup cohort is therefore incomplete.
+    The latest signup month is treated as immature and excluded from
+    opportunity sizing. The dataset snapshot is 2026-06-30, so the
+    latest signup cohort is incomplete.
 
-    This remains a scenario estimate, not a causal forecast.
+    This is a scenario estimate, not a causal forecast.
     """
 
     if relative_failure_reduction is not None:
@@ -808,9 +808,11 @@ def estimate_incremental_approvals(
     if actionable_segments is None or actionable_segments.empty:
         return pd.DataFrame()
 
+    # ------------------------------------------------------------
+    # Backward-compatible segment-level fallback
+    # ------------------------------------------------------------
+
     if stage_segment_table is None or stage_segment_table.empty:
-        # Backward-compatible fallback. This should not be used by the
-        # main pipeline because it cannot produce a true monthly estimate.
         df = actionable_segments.copy()
 
         if "not_cleared" not in df.columns:
@@ -843,6 +845,7 @@ def estimate_incremental_approvals(
         df["downstream_approval_rate"] = (
             overall_approval_rate
         )
+
         df["recoverable_captains"] = (
             pd.to_numeric(
                 df["not_cleared"],
@@ -850,13 +853,14 @@ def estimate_incremental_approvals(
             ).fillna(0)
             * improvement_rate
         )
+
         df["estimated_incremental_approvals"] = (
             df["recoverable_captains"]
             * df["downstream_approval_rate"]
         )
 
-        # Explicitly do NOT call this monthly because the source table
-        # has no monthly population.
+        # The fallback has no signup-month population, so it must not
+        # be labelled as a monthly estimate.
         df["monthly_incremental_approvals"] = np.nan
         df["improvement_rate"] = improvement_rate
         df["scenario_note"] = (
@@ -912,7 +916,6 @@ def estimate_incremental_approvals(
         ("INSURANCE", "stage_INSURANCE", "stage_FITNESS"),
     ]
 
-    # Clean month values.
     df["signup_month"] = (
         df["signup_month"]
         .astype("string")
@@ -954,22 +957,17 @@ def estimate_incremental_approvals(
 
         if reached_rule is None:
             working["_reached"] = True
-
         elif reached_rule == "permit_required":
             working["_reached"] = (
-                working["permit_required"]
-                .astype(bool)
+                working["permit_required"].astype(bool)
             )
-
         else:
             working["_reached"] = (
-                working[reached_rule]
-                .astype(bool)
+                working[reached_rule].astype(bool)
             )
 
         working["_cleared"] = (
-            working[cleared_column]
-            .astype(bool)
+            working[cleared_column].astype(bool)
         )
 
         # A captain can only be approved if the stage was cleared.
@@ -979,19 +977,11 @@ def estimate_incremental_approvals(
         )
 
         grouped = (
-            working[
-                working["_reached"]
-            ]
+            working[working["_reached"]]
             .groupby(segment_columns)
             .agg(
-                reached=(
-                    "captain_id",
-                    "nunique",
-                ),
-                cleared=(
-                    "_cleared",
-                    "sum",
-                ),
+                reached=("captain_id", "nunique"),
+                cleared=("_cleared", "sum"),
                 approved_after_stage=(
                     "_approved_after_stage",
                     "sum",
@@ -1004,8 +994,7 @@ def estimate_incremental_approvals(
             _safe_divide(
                 grouped["approved_after_stage"],
                 grouped["cleared"],
-            )
-            .fillna(0)
+            ).fillna(0)
         )
 
         grouped["stage"] = stage_name
@@ -1013,12 +1002,12 @@ def estimate_incremental_approvals(
         downstream_rows.append(
             grouped[
                 segment_columns
-                + [
-                    "stage",
-                    "downstream_approval_rate",
-                ]
+                + ["stage", "downstream_approval_rate"]
             ]
         )
+
+    if not downstream_rows:
+        return pd.DataFrame()
 
     downstream = pd.concat(
         downstream_rows,
@@ -1034,26 +1023,33 @@ def estimate_incremental_approvals(
     if "stage" not in action.columns:
         return pd.DataFrame()
 
+    missing_action_columns = [
+        column
+        for column in segment_columns
+        if column not in action.columns
+    ]
+
+    if missing_action_columns:
+        raise ValueError(
+            "actionable_segments is missing required columns: "
+            + ", ".join(sorted(missing_action_columns))
+        )
+
     action = action[
-        segment_columns
-        + ["stage"]
+        segment_columns + ["stage"]
     ].drop_duplicates()
 
-    # Only size actionable rows that meet the minimum historical
-    # population threshold in mature cohorts.
-    mature_action = (
-        downstream.merge(
-            action,
-            on=segment_columns + ["stage"],
-            how="inner",
-        )
+    mature_action = downstream.merge(
+        action,
+        on=segment_columns + ["stage"],
+        how="inner",
     )
 
     if mature_action.empty:
         return pd.DataFrame()
 
     # ------------------------------------------------------------
-    # Calculate monthly failed populations
+    # Calculate failed populations by mature signup month
     # ------------------------------------------------------------
 
     monthly_rows = []
@@ -1063,28 +1059,21 @@ def estimate_incremental_approvals(
 
         if reached_rule is None:
             working["_reached"] = True
-
         elif reached_rule == "permit_required":
             working["_reached"] = (
-                working["permit_required"]
-                .astype(bool)
+                working["permit_required"].astype(bool)
             )
-
         else:
             working["_reached"] = (
-                working[reached_rule]
-                .astype(bool)
+                working[reached_rule].astype(bool)
             )
 
         working["_cleared"] = (
-            working[cleared_column]
-            .astype(bool)
+            working[cleared_column].astype(bool)
         )
 
         monthly = (
-            working[
-                working["_reached"]
-            ]
+            working[working["_reached"]]
             .groupby(
                 [
                     "signup_month",
@@ -1092,26 +1081,21 @@ def estimate_incremental_approvals(
                 ]
             )
             .agg(
-                reached=(
-                    "captain_id",
-                    "nunique",
-                ),
-                cleared=(
-                    "_cleared",
-                    "sum",
-                ),
+                reached=("captain_id", "nunique"),
+                cleared=("_cleared", "sum"),
             )
             .reset_index()
         )
 
         monthly["not_cleared"] = (
-            monthly["reached"]
-            - monthly["cleared"]
+            monthly["reached"] - monthly["cleared"]
         )
 
         monthly["stage"] = stage_name
-
         monthly_rows.append(monthly)
+
+    if not monthly_rows:
+        return pd.DataFrame()
 
     monthly = pd.concat(
         monthly_rows,
@@ -1139,8 +1123,7 @@ def estimate_incremental_approvals(
     # ------------------------------------------------------------
 
     monthly["recoverable_captains"] = (
-        monthly["not_cleared"]
-        * improvement_rate
+        monthly["not_cleared"] * improvement_rate
     )
 
     monthly["estimated_incremental_approvals"] = (
@@ -1148,7 +1131,8 @@ def estimate_incremental_approvals(
         * monthly["downstream_approval_rate"]
     )
 
-    # This is now genuinely monthly because every row is a signup cohort.
+    # Every row now represents one signup-month cohort, so this is
+    # the scenario opportunity attributable to that cohort.
     monthly["monthly_incremental_approvals"] = (
         monthly["estimated_incremental_approvals"]
     )
@@ -1172,7 +1156,6 @@ def estimate_incremental_approvals(
             monthly["reached"] >= minimum_reached
         ].copy()
 
-    # Useful ordering for the output.
     return monthly.sort_values(
         [
             "monthly_incremental_approvals",
@@ -1184,6 +1167,86 @@ def estimate_incremental_approvals(
         ],
     ).reset_index(drop=True)
 
+
+# ============================================================
+# A2 - OPPORTUNITY SUMMARY
+# ============================================================
+
+def summarize_a2_opportunity(
+    approval_opportunity: pd.DataFrame,
+) -> pd.DataFrame:
+    """
+    Summarise A2 opportunity by stage.
+
+    The detailed opportunity table contains one row per
+    signup-month × city × vehicle × acquisition-channel × stage.
+    This summary separates the total opportunity across mature
+    cohorts from the average opportunity per mature signup month.
+
+    The result is a planning scenario, not a forecast or causal
+    estimate.
+    """
+
+    if (
+        approval_opportunity is None
+        or approval_opportunity.empty
+    ):
+        return pd.DataFrame()
+
+    df = approval_opportunity.copy()
+
+    required_columns = {
+        "stage",
+        "signup_month",
+        "estimated_incremental_approvals",
+    }
+
+    missing = required_columns - set(df.columns)
+
+    if missing:
+        raise ValueError(
+            "approval_opportunity is missing required columns: "
+            + ", ".join(sorted(missing))
+        )
+
+    df["estimated_incremental_approvals"] = (
+        pd.to_numeric(
+            df["estimated_incremental_approvals"],
+            errors="coerce",
+        ).fillna(0)
+    )
+
+    stage_summary = (
+        df.groupby("stage", as_index=False)
+        .agg(
+            mature_cohort_opportunity=(
+                "estimated_incremental_approvals",
+                "sum",
+            ),
+            mature_signup_months=(
+                "signup_month",
+                "nunique",
+            ),
+        )
+    )
+
+    stage_summary["average_monthly_scenario"] = (
+        _safe_divide(
+            stage_summary["mature_cohort_opportunity"],
+            stage_summary["mature_signup_months"],
+        )
+    )
+
+    stage_summary["scenario_note"] = (
+        "Scenario estimate across observed mature signup cohorts. "
+        "Average is a descriptive monthly scenario, not a forecast "
+        "or causal impact."
+    )
+
+    return stage_summary.sort_values(
+        "mature_cohort_opportunity",
+        ascending=False,
+    ).reset_index(drop=True)
 
 # ============================================================
 # A3 - CAMPAIGN ANALYSIS
@@ -2839,6 +2902,231 @@ def build_airport_recommendation(
 
 
 # ============================================================
+# A4 - RANKED RECOMMENDATIONS
+# ============================================================
+
+def build_ranked_recommendations(
+    approval_opportunity: pd.DataFrame,
+    campaign_confidence: dict,
+    approved_count: int,
+    first_order_count: int,
+    permit_recovery_rate: float = 0.20,
+    r2a_improvement_pp: float = 5.0,
+) -> pd.DataFrame:
+    """
+    Build the three ranked Part-A recommendations required by A4.
+
+    Recommendation order:
+        1. Targeted Permit recovery.
+        2. Approved -> First Order activation.
+        3. Validate CAMP_WA_002 with a randomized holdout.
+
+    Impact figures are planning scenarios where assumptions are used.
+    They are not causal forecasts.
+    """
+
+    if approved_count < 0 or first_order_count < 0:
+        raise ValueError(
+            "approved_count and first_order_count cannot be negative."
+        )
+
+    if first_order_count > approved_count:
+        raise ValueError(
+            "first_order_count cannot exceed approved_count."
+        )
+
+    if not 0 <= permit_recovery_rate <= 1:
+        raise ValueError(
+            "permit_recovery_rate must be between 0 and 1."
+        )
+
+    if not 0 <= r2a_improvement_pp <= 100:
+        raise ValueError(
+            "r2a_improvement_pp must be between 0 and 100."
+        )
+
+    # ------------------------------------------------------------
+    # Recommendation 1 - Permit recovery
+    # ------------------------------------------------------------
+
+    permit_total = 0.0
+    permit_months = 0
+
+    if (
+        approval_opportunity is not None
+        and not approval_opportunity.empty
+        and "stage" in approval_opportunity.columns
+        and "estimated_incremental_approvals"
+        in approval_opportunity.columns
+    ):
+        permit_rows = approval_opportunity[
+            approval_opportunity["stage"]
+            .astype(str)
+            .str.upper()
+            .eq("PERMIT")
+        ].copy()
+
+        permit_rows["estimated_incremental_approvals"] = (
+            pd.to_numeric(
+                permit_rows["estimated_incremental_approvals"],
+                errors="coerce",
+            ).fillna(0)
+        )
+
+        permit_total = float(
+            permit_rows[
+                "estimated_incremental_approvals"
+            ].sum()
+        )
+
+        if "signup_month" in permit_rows.columns:
+            permit_months = int(
+                permit_rows["signup_month"].nunique()
+            )
+
+    permit_average_monthly = (
+        permit_total / permit_months
+        if permit_months > 0
+        else 0.0
+    )
+
+    # ------------------------------------------------------------
+    # Recommendation 2 - Approved -> First Order
+    # ------------------------------------------------------------
+
+    current_r2a = (
+        first_order_count / approved_count
+        if approved_count > 0
+        else 0.0
+    )
+
+    target_r2a = min(
+        current_r2a + (r2a_improvement_pp / 100.0),
+        1.0,
+    )
+
+    incremental_first_orders = (
+        approved_count
+        * (target_r2a - current_r2a)
+    )
+
+    # ------------------------------------------------------------
+    # Recommendation 3 - Campaign holdout
+    # ------------------------------------------------------------
+
+    observed_lift = campaign_confidence.get(
+        "observed_lift_pp"
+    ) if campaign_confidence else None
+
+    adjusted_lift = campaign_confidence.get(
+        "adjusted_lift_pp"
+    ) if campaign_confidence else None
+
+    observed_text = (
+        f"observed approval lift +{float(observed_lift):.1f} pp"
+        if observed_lift is not None
+        else "positive observed approval association"
+    )
+
+    adjusted_text = (
+        f"adjusted association +{float(adjusted_lift):.1f} pp"
+        if adjusted_lift is not None
+        else ""
+    )
+
+    campaign_impact = observed_text
+    if adjusted_text:
+        campaign_impact += f"; {adjusted_text}"
+
+    recommendations = [
+        {
+            "rank": 1,
+            "recommendation": (
+                "Target Permit leakage in high-impact "
+                "city × vehicle × acquisition-channel segments."
+            ),
+            "expected_impact": (
+                f"~{permit_average_monthly:.1f} modeled additional "
+                "approvals per mature signup month on average."
+            ),
+            "working": (
+                f"20% relative reduction in Permit non-clearance "
+                "× pooled downstream approval probability. "
+                f"Observed mature-cohort opportunity is "
+                f"~{permit_total:.1f} approvals across "
+                f"{permit_months} mature signup months."
+            ),
+            "cost_or_risk": (
+                "Ops/product effort for clearer requirements, "
+                "failure feedback and faster re-upload support."
+            ),
+            "measurement": (
+                "Measure Permit clearance, downstream approval and "
+                "incremental approvals against a controlled intervention."
+            ),
+            "confidence": (
+                "Planning scenario; not causal."
+            ),
+        },
+        {
+            "rank": 2,
+            "recommendation": (
+                "Improve Approved → First Order activation."
+            ),
+            "expected_impact": (
+                f"~{incremental_first_orders:.0f} additional first-order "
+                f"captains under a +{r2a_improvement_pp:.0f} pp R2A scenario."
+            ),
+            "working": (
+                f"{approved_count:,} approved captains × "
+                f"+{r2a_improvement_pp:.0f} percentage points. "
+                f"Current R2A is {current_r2a:.1%}."
+            ),
+            "cost_or_risk": (
+                "Activation incentives or follow-up may add cost; "
+                "avoid paying for captains who would activate anyway."
+            ),
+            "measurement": (
+                "Run a randomized activation intervention and measure "
+                "incremental first-order completion and cost per "
+                "incremental first order."
+            ),
+            "confidence": (
+                "Planning scenario; actual uplift requires testing."
+            ),
+        },
+        {
+            "rank": 3,
+            "recommendation": (
+                "Validate CAMP_WA_002 with a randomized holdout "
+                "before scaling."
+            ),
+            "expected_impact": campaign_impact,
+            "working": (
+                "Randomly hold out eligible captains and compare "
+                "approval and first-order outcomes between treatment "
+                "and control."
+            ),
+            "cost_or_risk": (
+                "A holdout sacrifices some short-term campaign exposure; "
+                "scaling without validation risks paying for "
+                "non-incremental approvals."
+            ),
+            "measurement": (
+                "Incremental approval, incremental first order, "
+                "cost per incremental approval and campaign ROI."
+            ),
+            "confidence": (
+                "Current result is observational; causal impact is "
+                "not established."
+            ),
+        },
+    ]
+
+    return pd.DataFrame(recommendations)
+
+
+# ============================================================
 # JSON UTILITY
 # ============================================================
 
@@ -2862,4 +3150,196 @@ def save_json(
             indent=2,
             ensure_ascii=False,
         )
-        
+
+import pandas as pd
+import numpy as np
+
+
+def calculate_intervention_priority(
+    a2_segments,
+    r2a_rate,
+    recovery_rate=0.20,
+):
+    """
+    Convert onboarding leakage into expected
+    productive captain supply.
+
+    recovery_rate:
+        assumed relative reduction in non-clearance.
+    """
+
+    df = a2_segments.copy()
+
+    required_columns = [
+        "stage",
+        "reached",
+        "not_cleared",
+    ]
+
+    missing = [
+        col for col in required_columns
+        if col not in df.columns
+    ]
+
+    if missing:
+        raise ValueError(
+            f"A2 segment table missing columns: {missing}"
+        )
+
+    df["recovered_captains"] = (
+        df["not_cleared"]
+        * recovery_rate
+    )
+
+    if "downstream_approval_rate" in df.columns:
+        approval_rate = (
+            pd.to_numeric(
+                df["downstream_approval_rate"],
+                errors="coerce",
+            )
+            .fillna(0)
+        )
+    else:
+        approval_rate = 1.0
+
+    df["expected_incremental_approvals"] = (
+        df["recovered_captains"]
+        * approval_rate
+    )
+
+    df["expected_incremental_first_orders"] = (
+        df["expected_incremental_approvals"]
+        * r2a_rate
+    )
+
+    df["priority_score"] = (
+        df["expected_incremental_first_orders"]
+        / np.maximum(
+            df["reached"],
+            1,
+        )
+    )
+
+    df["intervention"] = (
+        df["stage"]
+        .astype(str)
+        .str.upper()
+        .map(
+            lambda x:
+            f"{x} leakage intervention"
+        )
+    )
+
+    df = df.sort_values(
+        [
+            "expected_incremental_first_orders",
+            "priority_score",
+        ],
+        ascending=False,
+    )
+
+    df["priority"] = np.select(
+        [
+            df["expected_incremental_first_orders"] >= 20,
+            df["expected_incremental_first_orders"] >= 10,
+        ],
+        [
+            "P0",
+            "P1",
+        ],
+        default="P2",
+    )
+
+    return df
+
+
+def build_simple_intervention_table(
+    actionable_segments,
+    r2a_rate=0.383,
+    recovery_rate=0.20,
+):
+    """
+    Fallback decision engine for the existing
+    A2 actionable-segment output.
+    """
+
+    df = actionable_segments.copy()
+
+    df["recovered_captains"] = (
+        df["not_cleared"]
+        * recovery_rate
+    )
+
+    if "downstream_approval_rate" in df.columns:
+        approval_rate = (
+            pd.to_numeric(
+                df["downstream_approval_rate"],
+                errors="coerce",
+            )
+            .fillna(1.0)
+        )
+    else:
+        approval_rate = 1.0
+
+    df["expected_incremental_approvals"] = (
+        df["recovered_captains"]
+        * approval_rate
+    )
+
+    df["expected_incremental_first_orders"] = (
+        df["expected_incremental_approvals"]
+        * r2a_rate
+    )
+
+    df["priority_score"] = (
+        df["expected_incremental_first_orders"]
+        / df["reached"].clip(lower=1)
+    )
+
+    df["priority"] = pd.cut(
+        df["expected_incremental_first_orders"],
+        bins=[
+            -np.inf,
+            10,
+            25,
+            np.inf,
+        ],
+        labels=[
+            "P2",
+            "P1",
+            "P0",
+        ],
+    )
+
+    return df.sort_values(
+        "expected_incremental_first_orders",
+        ascending=False,
+    )
+
+
+def save_intervention_priority(
+    df,
+    output_path,
+):
+    columns = [
+        column
+        for column in [
+            "city",
+            "vehicle_type",
+            "acquisition_channel",
+            "stage",
+            "reached",
+            "not_cleared",
+            "recovered_captains",
+            "expected_incremental_approvals",
+            "expected_incremental_first_orders",
+            "priority_score",
+            "priority",
+        ]
+        if column in df.columns
+    ]
+
+    df[columns].to_csv(
+        output_path,
+        index=False,
+    )        

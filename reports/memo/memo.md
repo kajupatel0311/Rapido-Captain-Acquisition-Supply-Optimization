@@ -1,19 +1,20 @@
-# Analysis Memo
-from pathlib import Path
+# Rapido Captain Acquisition & Supply — Executive Memo
 
-memo = """# Rapido Captain Acquisition & Supply — Executive Memo
+## Executive Summary
 
-## Executive summary
+The main opportunity is not simply to acquire more captains, but to increase the number of **productive captains** who complete onboarding, get approved, and actually complete a first order.
 
-The main opportunity is not simply to increase captain sign-ups; it is to convert existing signup intent into approved and productive supply. From 25,000 sign-ups, 4,206 captains are approved (16.8%) and only 1,610 complete a first order (6.4%). The largest onboarding losses occur at RC, Permit, and Insurance, while Permit is the clearest targeted opportunity because its leakage is concentrated in specific city × vehicle × acquisition-channel segments. Separately, the airport supply gap is heavily concentrated late at night, where return-fare availability is weaker and cancellation is higher.
+From 25,000 signups, 4,206 captains were approved and 1,610 completed a first order. This means only **6.4% of signups reached first order**, with meaningful leakage both during document verification and after approval.
 
-I recommend: **(1)** target Permit verification in the highest-leak segments, **(2)** validate CAMP_WA_002 with a randomized holdout before scaling, and **(3)** test late-night airport incentives/repositioning before broad airport captain acquisition.
+The strongest onboarding opportunity is the **Permit stage for Auto/Cab captains**, particularly in Pune and Hyderabad. A scenario reducing Permit non-clearance by 20% indicates approximately **397 additional approvals per month** across mature cohorts. At the segment level, Pune Auto + organic acquisition has the largest modeled opportunity.
 
-## 1. Funnel and biggest fixable leak
+For supply-demand, airport shortages are concentrated during **21:00–03:00**, while airport-terminal fulfillment is substantially below CBD fulfillment. The immediate response should therefore be better positioning and incentives for existing captains before spending heavily on targeted acquisition.
 
-The onboarding funnel is defined at the captain level. Permit is required for Auto and Cab, while ERickshaw skips the Permit stage. The final funnel is:
+---
 
-| Stage | Captains | Stage conversion | Signup → stage |
+## A1. Funnel
+
+| Stage | Captains | Stage Conversion | Overall Conversion |
 |---|---:|---:|---:|
 | Signup | 25,000 | 100.0% | 100.0% |
 | DL | 21,954 | 87.8% | 87.8% |
@@ -22,78 +23,235 @@ The onboarding funnel is defined at the captain level. Permit is required for Au
 | Permit | 11,177 | 79.3% | 44.7% |
 | Fitness | 8,241 | 73.7% | 33.0% |
 | Insurance | 4,664 | 56.6% | 18.7% |
+| All Documents Cleared | 4,664 | 100.0% | 18.7% |
 | Approved | 4,206 | 90.2% | 16.8% |
 | First Order | 1,610 | 38.3% | 6.4% |
 
-RC has the largest absolute loss among sequential document stages (6,102 captains), while Insurance has the weakest conversion (56.6%). However, the segment analysis identifies **Permit** as the most actionable targeted bottleneck.
+**Biggest absolute document-stage loss:** Insurance, with 3,577 captains not clearing that stage.
 
-The largest Permit leaks are concentrated in Pune Auto organic_app (744 not cleared; 63.5% drop-off), Hyderabad Cab organic_app (727; 59.6%), Hyderabad Auto organic_app (682; 60.4%), Bangalore Cab organic_app (558; 59.3%), and Pune Auto referral (525; 64.0%).
+**Largest downstream opportunity:** 2,596 approved captains did not complete a first order. This makes post-approval activation a major lever in addition to document recovery.
 
-Under a planning scenario that reduces Permit non-clearance by 20% for mature cohorts and applies historical downstream approval rates, Permit represents approximately **396.6 scenario-estimated incremental approvals across the observed mature segment-month population**. This is a sizing scenario, not a causal forecast.
+### Cohort rule
 
-**Action:** prioritize Permit document guidance, verification feedback, and re-upload support in the highest-leak segments rather than applying a blanket intervention across all captains.
+Funnel metrics are based on signup cohorts, with the latest signup period excluded where necessary so that captains have enough time to progress through onboarding.
 
-## 2. CAMP_WA_002
+---
 
-CAMP_WA_002 is strongly associated with approval:
+## A2. Biggest Fixable Leak
 
-- Treated: 8,673 captains
-- Control: 16,327 captains
+The most actionable onboarding problem is **Permit completion for Auto/Cab captains**.
+
+The opportunity is concentrated in specific city × vehicle × acquisition-channel segments rather than being evenly distributed across the funnel.
+
+Top segment examples:
+
+| Segment | Permit Reached | Not Cleared | Drop-off |
+|---|---:|---:|---:|
+| Pune · Auto · Organic | 1,172 | 744 | 63.5% |
+| Hyderabad · Cab · Organic | 1,219 | 727 | 59.6% |
+| Hyderabad · Auto · Organic | 1,129 | 682 | 60.4% |
+| Pune · Auto · Referral | 820 | 525 | 64.0% |
+| Bangalore · Cab · Organic | 941 | 558 | 59.3% |
+
+A scenario reducing stage non-clearance by **20% relative** suggests approximately **397 incremental approvals per month from Permit alone** across mature cohorts.
+
+This is a planning scenario, not a causal forecast.
+
+The highest-priority individual segment is:
+
+**Pune × Auto × Organic × Permit**
+
+It represents a modeled opportunity of roughly **149 additional approvals/month**, before considering the downstream first-order conversion.
+
+### Recommended intervention
+
+Use an escalating Permit recovery journey:
+
+1. Identify captains failing or repeatedly failing Permit verification.
+2. Show a clear failure reason and the next required action.
+3. Provide targeted document guidance.
+4. Prioritize repeated-failure captains for assisted support.
+5. Measure recovery by signup cohort and segment.
+
+The key metric should be **incremental approvals per 1,000 affected captains**, not simply message engagement.
+
+---
+
+## A3. CAMP_WA_002
+
+CAMP_WA_002 shows a strong positive association with approval.
+
+- Treated captains: **8,673**
+- Control captains: **16,327**
 - Observed approval lift: **+17.9 percentage points**
 - 95% CI: **+16.8 to +19.0 pp**
-- Adjusted lift: **+16.7 pp**
-- Odds ratio: **3.26** (95% CI approximately 3.04–3.50)
+- Adjusted approval lift: **+16.7 percentage points**
+- Adjusted odds ratio: **3.26**
 
-The result is statistically strong, but campaign exposure was not randomized. Therefore, the estimate should be treated as **observational association, not causal impact**.
+The result is statistically strong, but campaign exposure was not randomized.
 
-**Action:** run a randomized holdout before materially increasing campaign spend. Primary KPI should be incremental approved captains per unit of campaign cost, with secondary checks for downstream first-order conversion.
+**Recommendation:** do not treat the +16.7 pp estimate as causal yet. Run a randomized holdout before scaling the campaign broadly.
 
-## 3. Airport supply and post-trip behavior
+The holdout should measure:
 
-Airport supply is substantially worse than the rest of the marketplace. The estimated gap is concentrated in late-night hours: **72.7% of the estimated airport supply gap falls between 21:00 and 03:00**. The largest hourly gaps are at 22:00 (about 1,070 captain-equivalents), 23:00 (1,061), 01:00 (1,060), 02:00 (1,018), 00:00 (973), and 21:00 (897).
+- Approval rate
+- Incremental approvals
+- Cost per incremental approval
+- First-order conversion
+- Cost per productive captain
 
-Across 60,000 sampled airport-origin trips:
+---
+
+## A4. Ranked Recommendations
+
+### 1. Fix Permit completion in high-opportunity segments
+
+**Impact:** High  
+**Cost:** Medium  
+**Risk:** Medium  
+
+Prioritize Auto/Cab Permit recovery in Pune and Hyderabad first. The modeled opportunity is approximately **397 incremental approvals/month** under the stated 20% recovery scenario.
+
+**Measurement:** incremental approval rate and first-order conversion among intervention vs. control groups.
+
+---
+
+### 2. Improve Approved → First Order conversion
+
+**Impact:** High  
+**Cost:** Medium  
+**Risk:** Low–Medium  
+
+Only **38.3% of approved captains completed a first order**. This is a large pool of already-approved captains where acquisition cost has effectively already been incurred.
+
+Test:
+
+- first-order nudges,
+- supply-zone recommendations,
+- onboarding completion assistance,
+- targeted incentives,
+- early activation support.
+
+**Measurement:** approved-to-first-order conversion and cost per incremental first-order captain.
+
+---
+
+### 3. Validate CAMP_WA_002 before scaling
+
+**Impact:** Potentially High  
+**Cost:** Low  
+**Risk:** Low  
+
+The campaign has a strong adjusted association, but causal impact has not been established.
+
+Run a randomized holdout and scale only if incremental approval and first-order economics remain positive.
+
+---
+
+# Associate Analysis — Airport Supply
+
+## B1. Where is supply insufficient?
+
+Airport terminals show a major supply-demand mismatch compared with CBD zones.
+
+Approximate fulfillment:
+
+- Airport terminals: **~60%**
+- CBD zones: **~97.5%**
+
+The largest hourly gaps occur during **21:00–03:00**, particularly around 22:00, 23:00, 00:00, 01:00 and 02:00.
+
+This indicates that the problem is not simply insufficient supply throughout the day; it is concentrated in specific airport time windows.
+
+---
+
+## B2. What happens after airport trips?
+
+Across airport trips:
 
 - Cancellation rate: **13.8%**
-- Return-fare within 20 minutes: **36.0%**
-- Average fare: **₹279**
-- Average distance: **17.9 km**
+- Return fare within 20 minutes: **36.0%**
+- Average fare: approximately **₹279**
+- Average trip distance: approximately **17.9 km**
 
-During the late-night window, return-fare availability falls to **29.8%** while cancellation rises to **17.1%**. This pattern is consistent with weaker late-night round-trip economics or other supply friction, although the trip data has no captain_id and therefore cannot establish individual captain retention.
+During the late-night 21:00–03:00 window:
 
-**Action:** test late-night airport repositioning and targeted economic incentives before broad acquisition. Measure fulfilment, unfulfilled requests, ETA, captain online hours, cancellation, and incentive ROI.
+- Cancellation rate increases to **17.1%**
+- Return-fare rate falls to **29.8%**
 
-## 4. Prioritized recommendations
+This suggests that late-night airport supply is less attractive from a utilization perspective and may require stronger positioning or incentives.
 
-### 1 — Fix targeted Permit leakage
-**Impact:** Highest modeled onboarding opportunity; Permit contributes ~396.6 scenario-estimated incremental approvals across mature segment-months under the stated assumption.  
-**Cost:** Medium — product/ops changes to guidance, verification feedback, and re-upload support.  
-**Risk:** Low–medium — avoid increasing approvals by weakening document-quality controls.  
-**Measurement:** Permit clearance rate, re-upload rate, verification turnaround, A2O, and cost per incremental approval.
+---
 
-### 2 — Validate CAMP_WA_002 before scaling
-**Impact:** Large observed/adjusted association (+17.9 pp / +16.7 pp).  
-**Cost:** Low–medium — randomized holdout and campaign instrumentation.  
-**Risk:** Medium — observed association may contain selection/confounding.  
-**Measurement:** incremental approval lift, confidence interval, cost per incremental approval, and downstream R2A.
+## B3. Should Rapido target specific captain acquisition?
 
-### 3 — Solve airport late-night supply economics before broad acquisition
-**Impact:** 72.7% of the estimated airport gap is late-night.  
-**Cost:** Medium — incentive/repositioning experiment.  
-**Risk:** Medium — incentives can improve fulfilment while destroying unit economics.  
-**Measurement:** fulfilment, ETA, unfulfilled demand, cancellation, captain utilization, and incentive ROI.
+### Recommendation: Yes, but not as the first intervention.
 
-## Assumptions and limitations
+The analysis indicates that airport supply shortage is highly concentrated in late-night hours. Before acquiring new captains specifically for the airport, Rapido should test whether existing supply can be repositioned effectively.
 
-- The latest signup cohort is excluded from A2 opportunity sizing because it may not have reached full onboarding maturity.
-- Permit applies to Auto and Cab; ERickshaw skips that stage.
-- The 20% improvement rate is a planning assumption.
-- A2 downstream approval rates are based on historical mature cohorts and are not causal.
-- CAMP_WA_002 was not randomized; causal impact requires a holdout.
-- Airport supply sizing uses a historical fulfillment benchmark and should be treated as a capacity-sizing indicator, not a literal hiring requirement.
-- Airport trip data is sampled and does not contain captain_id, so post-trip behavior is a proxy for trip economics rather than longitudinal captain retention.
-"""
+### Priority sequence
 
-out = Path("/mnt/data/rapido_updated/memo.md")
-out.write_text(memo, encoding="utf-8")
-print(out)
+**1. Reposition existing captains**
+
+Target nearby captains before the 21:00–03:00 shortage window.
+
+**2. Introduce targeted airport incentives**
+
+Use time- and location-specific incentives rather than broad incentives.
+
+**3. Measure the economics**
+
+Compare incremental fulfilled requests against incentive cost.
+
+**4. Only then use targeted acquisition**
+
+If the shortage remains after repositioning and incentives, acquire captains matching the required:
+
+- city,
+- vehicle type,
+- airport proximity,
+- availability during 21:00–03:00.
+
+This is a better strategy than optimizing for generic signup volume.
+
+---
+
+# Decision Framework
+
+The analysis prioritizes interventions using:
+
+**Affected captains × recovery opportunity × downstream approval probability × first-order conversion**
+
+This shifts the objective from:
+
+> "How many captains can we acquire?"
+
+to:
+
+> **"How many productive captains can we create?"**
+
+For supply planning, the same principle is applied from the opposite direction:
+
+**Demand gap → required supply → captain profile → targeted intervention → measured incremental supply**
+
+---
+
+# Final Recommendation
+
+Rapido should focus on three connected levers:
+
+1. **Recover high-value onboarding leaks**, starting with Permit for Auto/Cab captains in Pune and Hyderabad.
+2. **Convert approved captains into first orders**, because a large existing pool is already lost after approval.
+3. **Use controlled experiments for campaign and airport interventions**, rather than assuming observational uplift is causal.
+
+The broader opportunity is to move from volume-based acquisition to **demand-led productive captain acquisition**: identify where supply is needed, determine which captain profiles can solve the gap, and invest only where incremental productive supply can be measured.
+
+---
+
+## Key Assumptions & Limitations
+
+- The data is synthetic and should be treated as an analytical exercise rather than production performance.
+- Permit recovery estimates use a **20% relative reduction in non-clearance** as a scenario assumption.
+- CAMP_WA_002 exposure is observational; the adjusted estimate should not be interpreted as causal.
+- Airport supply-gap estimates depend on the hourly supply-demand assumptions in the provided data.
+- Recommendations should ultimately be validated through randomized or controlled experiments.
